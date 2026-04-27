@@ -1,5 +1,6 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
+const translate = require('google-translate-api-x');
 
 // ============================================================
 //  配置
@@ -50,7 +51,7 @@ async function scrapeTrending() {
     const forksText = $el.find('a[href$="/forks"]').text().trim().replace(/,/g, '');
     const forks = forksText || '0';
 
-    // 今日新增 Star (最后一个 span 通常包含 "xxx stars today")
+    // 今日新增 Star
     const todayStars =
       $el.find('span.d-inline-block.float-sm-right').text().trim() ||
       $el.find('span:last-child').text().trim().match(/[\d,]+ stars/)?.[0] ||
@@ -73,7 +74,63 @@ async function scrapeTrending() {
 }
 
 // ============================================================
-//  2. 格式化为 HTML
+//  2. 翻译描述为中文
+// ============================================================
+async function translateDescriptions(repos) {
+  console.log('🌐 正在翻译项目描述为中文 ...');
+
+  // 收集需要翻译的描述（跳过已经是中文的或空的）
+  const toTranslate = [];
+  const indexMap = []; // 记录原始索引
+
+  for (let i = 0; i < repos.length; i++) {
+    const desc = repos[i].description;
+    if (desc && desc !== '暂无描述' && !isChinese(desc)) {
+      toTranslate.push(desc);
+      indexMap.push(i);
+    }
+  }
+
+  if (toTranslate.length === 0) {
+    console.log('  所有描述已是中文，跳过翻译');
+    return repos;
+  }
+
+  // 逐条翻译，避免批量翻译被合并或截断
+  let successCount = 0;
+  for (let j = 0; j < toTranslate.length; j++) {
+    try {
+      const result = await translate(toTranslate[j], { from: 'en', to: 'zh-CN' });
+      repos[indexMap[j]].description = result.text;
+      successCount++;
+    } catch (err) {
+      // 翻译失败则保留英文原文
+      console.warn(`  ⚠️ 第 ${indexMap[j] + 1} 个项目翻译失败，保留英文: ${err.message}`);
+    }
+    // 每次翻译间隔一小段时间，避免触发频率限制
+    if (j < toTranslate.length - 1) {
+      await sleep(300);
+    }
+  }
+
+  console.log(`✅ 翻译完成 (${successCount}/${toTranslate.length})`);
+  return repos;
+}
+
+/**
+ * 简单判断文本是否主要包含中文字符
+ */
+function isChinese(text) {
+  const chineseChars = text.match(/[\u4e00-\u9fff]/g) || [];
+  return chineseChars.length > text.length * 0.3;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ============================================================
+//  3. 格式化为 HTML
 // ============================================================
 function formatHTML(repos) {
   const today = new Date().toLocaleDateString('zh-CN', {
@@ -149,7 +206,7 @@ function formatHTML(repos) {
 }
 
 // ============================================================
-//  3. 通过 PushPlus 推送到微信
+//  4. 通过 PushPlus 推送到微信
 // ============================================================
 async function pushToWechat(html) {
   if (!PUSHPLUS_TOKEN) {
@@ -189,21 +246,26 @@ async function pushToWechat(html) {
 // ============================================================
 async function main() {
   try {
-    const repos = await scrapeTrending();
+    let repos = await scrapeTrending();
 
     if (repos.length === 0) {
       console.error('❌ 未爬取到任何项目，可能页面结构已变更');
       process.exit(1);
     }
 
+    // 翻译描述为中文
+    repos = await translateDescriptions(repos);
+
     const html = formatHTML(repos);
 
     // 本地调试：如果传入 --dry-run 参数，只打印不推送
     if (process.argv.includes('--dry-run')) {
-      console.log('\n--- 预览 HTML (dry-run 模式，不推送) ---\n');
+      console.log('\n--- 预览 (dry-run 模式，不推送) ---\n');
       console.log(`共 ${repos.length} 个项目：`);
       repos.forEach((r) => {
-        console.log(`  #${r.rank} ${r.name} ⭐${r.stars} - ${r.description.substring(0, 60)}...`);
+        console.log(`  #${r.rank} ${r.name} ⭐${r.stars}`);
+        console.log(`       ${r.description}`);
+        console.log('');
       });
       return;
     }
