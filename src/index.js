@@ -105,16 +105,26 @@ async function generateAISummary(about, readmeSnippet, repoName) {
 README 片段：
 ${readmeSnippet || '无'}`;
 
-  try {
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: prompt,
-    });
-    return response.text.trim();
-  } catch (err) {
-    console.warn(`  ⚠️ 项目 ${repoName} AI 总结失败: ${err.message}`);
-    return null;
+  // 最多重试 2 次（首次 + 1次重试）
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: prompt,
+      });
+      return response.text.trim();
+    } catch (err) {
+      const isRateLimit = err.message && (err.message.includes('429') || err.message.toLowerCase().includes('quota') || err.message.toLowerCase().includes('rate'));
+      if (isRateLimit && attempt < 2) {
+        console.warn(`  ⏳ Gemini 速率限制，等待 20 秒后重试 (${repoName})...`);
+        await sleep(20000);
+        continue;
+      }
+      console.warn(`  ⚠️ 项目 ${repoName} AI 总结失败: ${err.message}`);
+      return null;
+    }
   }
+  return null;
 }
 
 async function translateFallback(text) {
@@ -148,7 +158,8 @@ async function enrichDescriptions(repos) {
         repo.description = summary;
         repo.descSource = 'ai';
         aiCount++;
-        if (i < repos.length - 1) await sleep(1000);
+        // Gemini 免费版限制 10 RPM，每次请求间隔 6.5 秒确保不超限
+        if (i < repos.length - 1) await sleep(6500);
         continue;
       }
     }
