@@ -11,8 +11,8 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@google/genai": "^0.1.2",
     "axios": "^1.7.0",
-    "cheerio": "^1.0.0",
-    "google-translate-api-x": "^10.7.0"
+    "cheerio": "^1.0.0"
   }
 }

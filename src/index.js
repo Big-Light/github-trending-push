@@ -1,6 +1,8 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
-const translate = require('google-translate-api-x');
+const { GoogleGenAI } = require('@google/genai');
+
+const ai = new GoogleGenAI({}); // Automatically picks up GEMINI_API_KEY
 
 // ============================================================
 //  配置
@@ -74,55 +76,75 @@ async function scrapeTrending() {
 }
 
 // ============================================================
-//  2. 翻译描述为中文
+//  2. AI 总结并翻译描述
 // ============================================================
-async function translateDescriptions(repos) {
-  console.log('🌐 正在翻译项目描述为中文 ...');
-
-  // 收集需要翻译的描述（跳过已经是中文的或空的）
-  const toTranslate = [];
-  const indexMap = []; // 记录原始索引
-
-  for (let i = 0; i < repos.length; i++) {
-    const desc = repos[i].description;
-    if (desc && desc !== '暂无描述' && !isChinese(desc)) {
-      toTranslate.push(desc);
-      indexMap.push(i);
-    }
+async function fetchReadmeSnippet(repoUrl) {
+  try {
+    // 转换 url: https://github.com/owner/repo -> https://raw.githubusercontent.com/owner/repo/HEAD/README.md
+    const rawUrl = repoUrl.replace('github.com', 'raw.githubusercontent.com') + '/HEAD/README.md';
+    const res = await axios.get(rawUrl, { timeout: 10000 });
+    return res.data.substring(0, 1500);
+  } catch (err) {
+    // 如果没有 README 或请求失败，返回空字符串
+    return '';
   }
-
-  if (toTranslate.length === 0) {
-    console.log('  所有描述已是中文，跳过翻译');
-    return repos;
-  }
-
-  // 逐条翻译，避免批量翻译被合并或截断
-  let successCount = 0;
-  for (let j = 0; j < toTranslate.length; j++) {
-    try {
-      const result = await translate(toTranslate[j], { from: 'en', to: 'zh-CN' });
-      repos[indexMap[j]].description = result.text;
-      successCount++;
-    } catch (err) {
-      // 翻译失败则保留英文原文
-      console.warn(`  ⚠️ 第 ${indexMap[j] + 1} 个项目翻译失败，保留英文: ${err.message}`);
-    }
-    // 每次翻译间隔一小段时间，避免触发频率限制
-    if (j < toTranslate.length - 1) {
-      await sleep(300);
-    }
-  }
-
-  console.log(`✅ 翻译完成 (${successCount}/${toTranslate.length})`);
-  return repos;
 }
 
-/**
- * 简单判断文本是否主要包含中文字符
- */
-function isChinese(text) {
-  const chineseChars = text.match(/[\u4e00-\u9fff]/g) || [];
-  return chineseChars.length > text.length * 0.3;
+async function generateAISummary(about, readmeSnippet, repoName) {
+  const prompt = `你是一位技术项目分析师。根据以下 GitHub 项目信息，用中文写一段简洁的项目说明（2-3句话）。
+
+要求：
+1. 第一句话说明项目是什么、核心功能。
+2. 第二句话说明对个人开发者或普通用户可能有什么实际用途。
+3. 语言通俗易懂，避免生硬翻译腔。
+4. 只基于提供的信息总结，不要编造功能。
+
+项目名称：${repoName}
+项目简介（About）：${about}
+README 片段：
+${readmeSnippet || '无'}`;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: prompt,
+    });
+    return response.text.trim();
+  } catch (err) {
+    console.warn(`  ⚠️ 项目 ${repoName} AI 总结失败: ${err.message}`);
+    return null;
+  }
+}
+
+async function enrichDescriptions(repos) {
+  console.log('🌐 正在使用 AI 生成项目描述 ...');
+
+  if (!process.env.GEMINI_API_KEY) {
+     console.warn('⚠️ 未设置 GEMINI_API_KEY，跳过 AI 总结，保留原始描述。');
+     return repos;
+  }
+
+  let successCount = 0;
+  for (let i = 0; i < repos.length; i++) {
+    const repo = repos[i];
+    console.log(`  [${i + 1}/${repos.length}] 分析 ${repo.name}...`);
+    
+    const readmeSnippet = await fetchReadmeSnippet(repo.url);
+    const summary = await generateAISummary(repo.description, readmeSnippet, repo.name);
+    
+    if (summary) {
+      repo.description = summary;
+      successCount++;
+    }
+    
+    // 每次调用间隔 1 秒，避免触发 Gemini API 的速率限制
+    if (i < repos.length - 1) {
+      await sleep(1000);
+    }
+  }
+
+  console.log(`✅ AI 描述生成完成 (${successCount}/${repos.length})`);
+  return repos;
 }
 
 function sleep(ms) {
@@ -254,7 +276,7 @@ async function main() {
     }
 
     // 翻译描述为中文
-    repos = await translateDescriptions(repos);
+    repos = await enrichDescriptions(repos);
 
     const html = formatHTML(repos);
 

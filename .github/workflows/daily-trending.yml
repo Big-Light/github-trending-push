@@ -27,4 +27,5 @@ jobs:
       - name: 🚀 爬取并推送
         env:
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: node src/index.js
