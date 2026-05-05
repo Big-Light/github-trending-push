@@ -1,8 +1,9 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
 const { GoogleGenAI } = require('@google/genai');
+const translate = require('google-translate-api-x');
 
-const ai = new GoogleGenAI({}); // Automatically picks up GEMINI_API_KEY
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 // ============================================================
 //  配置
@@ -116,34 +117,58 @@ ${readmeSnippet || '无'}`;
   }
 }
 
-async function enrichDescriptions(repos) {
-  console.log('🌐 正在使用 AI 生成项目描述 ...');
+async function translateFallback(text) {
+  try {
+    const result = await translate(text, { from: 'en', to: 'zh-CN' });
+    return result.text;
+  } catch (err) {
+    return null;
+  }
+}
 
-  if (!process.env.GEMINI_API_KEY) {
-     console.warn('⚠️ 未设置 GEMINI_API_KEY，跳过 AI 总结，保留原始描述。');
-     return repos;
+async function enrichDescriptions(repos) {
+  console.log('🌐 正在处理项目描述（AI 总结 → 机器翻译 → 原文）...');
+
+  const hasGemini = !!process.env.GEMINI_API_KEY;
+  if (!hasGemini) {
+    console.warn('⚠️ 未设置 GEMINI_API_KEY，跳过 AI 总结，将使用机器翻译兜底。');
   }
 
-  let successCount = 0;
+  let aiCount = 0, translateCount = 0, originalCount = 0;
+
   for (let i = 0; i < repos.length; i++) {
     const repo = repos[i];
-    console.log(`  [${i + 1}/${repos.length}] 分析 ${repo.name}...`);
-    
-    const readmeSnippet = await fetchReadmeSnippet(repo.url);
-    const summary = await generateAISummary(repo.description, readmeSnippet, repo.name);
-    
-    if (summary) {
-      repo.description = summary;
-      successCount++;
+    console.log(`  [${i + 1}/${repos.length}] 处理 ${repo.name}...`);
+
+    // ── 第一层：Gemini AI 总结 ──
+    if (hasGemini) {
+      const readmeSnippet = await fetchReadmeSnippet(repo.url);
+      const summary = await generateAISummary(repo.description, readmeSnippet, repo.name);
+      if (summary) {
+        repo.description = summary;
+        repo.descSource = 'ai';
+        aiCount++;
+        if (i < repos.length - 1) await sleep(1000);
+        continue;
+      }
     }
-    
-    // 每次调用间隔 1 秒，避免触发 Gemini API 的速率限制
-    if (i < repos.length - 1) {
-      await sleep(1000);
+
+    // ── 第二层：Google Translate 翻译兜底 ──
+    const translated = await translateFallback(repo.description);
+    if (translated) {
+      repo.description = translated;
+      repo.descSource = 'translate';
+      translateCount++;
+      if (i < repos.length - 1) await sleep(300);
+      continue;
     }
+
+    // ── 第三层：保留英文原文 ──
+    repo.descSource = 'original';
+    originalCount++;
   }
 
-  console.log(`✅ AI 描述生成完成 (${successCount}/${repos.length})`);
+  console.log(`✅ 描述处理完成 — 🤖 AI总结: ${aiCount}  🌐 机器翻译: ${translateCount}  🔤 原文: ${originalCount}`);
   return repos;
 }
 
@@ -202,13 +227,22 @@ function formatHTML(repos) {
       ? `<span style="color:#57ab5a;font-size:12px;">📈 ${repo.todayStars}</span>`
       : '';
 
+    // 来源标识徽章
+    const sourceBadges = {
+      ai:        `<span style="display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;background:#1a237e;color:#82b1ff;margin-bottom:8px;">🤖 AI 总结</span>`,
+      translate: `<span style="display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;background:#1b2a3b;color:#90caf9;margin-bottom:8px;">🌐 机器翻译</span>`,
+      original:  `<span style="display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;background:#2d1b00;color:#ffb74d;margin-bottom:8px;">🔤 原文</span>`,
+    };
+    const sourceBadge = sourceBadges[repo.descSource] || '';
+
     html += `
   <div style="background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 12px;">
     <div style="margin-bottom: 8px;">
       <span style="color: #8b949e; font-size: 13px; margin-right: 8px;">#${repo.rank}</span>
       <a href="${repo.url}" style="color: #58a6ff; font-size: 16px; font-weight: 600; text-decoration: none;">${repo.name}</a>
     </div>
-    <p style="color: #c9d1d9; font-size: 13px; line-height: 1.5; margin: 0 0 10px 0;">${repo.description}</p>
+    ${sourceBadge}
+    <p style="color: #c9d1d9; font-size: 13px; line-height: 1.6; margin: 0 0 10px 0;">${repo.description}</p>
     <div style="display: flex; align-items: center; flex-wrap: wrap; gap: 8px;">
       ${langDot}
       <span style="color: #8b949e; font-size: 12px;">⭐ ${repo.stars}</span>
@@ -284,8 +318,9 @@ async function main() {
     if (process.argv.includes('--dry-run')) {
       console.log('\n--- 预览 (dry-run 模式，不推送) ---\n');
       console.log(`共 ${repos.length} 个项目：`);
+      const sourceLabel = { ai: '🤖 AI总结', translate: '🌐 机器翻译', original: '🔤 原文' };
       repos.forEach((r) => {
-        console.log(`  #${r.rank} ${r.name} ⭐${r.stars}`);
+        console.log(`  #${r.rank} ${r.name} ⭐${r.stars}  [${sourceLabel[r.descSource] || '?'}]`);
         console.log(`       ${r.description}`);
         console.log('');
       });
