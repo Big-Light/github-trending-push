@@ -1,9 +1,17 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
-const { GoogleGenAI } = require('@google/genai');
 const translate = require('google-translate-api-x');
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+let GoogleGenAI = null;
+try {
+  ({ GoogleGenAI } = require('@google/genai'));
+} catch (err) {
+  // 本地未安装依赖时仍允许测试和翻译兜底运行；GitHub Actions 会通过 npm install 安装。
+}
+
+const ai = GoogleGenAI && process.env.GEMINI_API_KEY
+  ? new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })
+  : null;
 
 // ============================================================
 //  配置
@@ -11,6 +19,58 @@ const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 const GITHUB_TRENDING_URL = 'https://github.com/trending';
 const PUSHPLUS_API = 'http://www.pushplus.plus/send';
 const PUSHPLUS_TOKEN = process.env.PUSHPLUS_TOKEN;
+const PUSHPLUS_CONTENT_LIMIT = Number.parseInt(process.env.PUSHPLUS_CONTENT_LIMIT || '19000', 10);
+const DESCRIPTION_CHAR_LIMIT = Number.parseInt(process.env.DESCRIPTION_CHAR_LIMIT || '220', 10);
+let geminiQuotaExhausted = false;
+
+function formatDate() {
+  return new Date().toLocaleDateString('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    timeZone: 'Asia/Shanghai',
+  });
+}
+
+function escapeHTML(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function truncateText(text, maxLength = DESCRIPTION_CHAR_LIMIT) {
+  const cleanText = String(text ?? '').replace(/\s+/g, ' ').trim();
+  const chars = Array.from(cleanText);
+  if (chars.length <= maxLength) return cleanText;
+  return `${chars.slice(0, Math.max(0, maxLength - 1)).join('').trimEnd()}…`;
+}
+
+function getErrorMessage(err) {
+  return String(err?.message || err || '');
+}
+
+function isGeminiQuotaError(err) {
+  const message = getErrorMessage(err).toLowerCase();
+  return (
+    message.includes('resource_exhausted') ||
+    message.includes('generate_requests_per_day') ||
+    message.includes('generaterequestsperday') ||
+    message.includes('current quota') ||
+    message.includes('quota exceeded')
+  );
+}
+
+function isGeminiRateLimitError(err) {
+  const message = getErrorMessage(err).toLowerCase();
+  return message.includes('429') || message.includes('quota') || message.includes('rate');
+}
+
+function resetGeminiQuotaState() {
+  geminiQuotaExhausted = false;
+}
 
 // ============================================================
 //  1. 爬取 GitHub Trending
@@ -91,7 +151,18 @@ async function fetchReadmeSnippet(repoUrl) {
   }
 }
 
-async function generateAISummary(about, readmeSnippet, repoName) {
+async function generateAISummary(about, readmeSnippet, repoName, options = {}) {
+  if (geminiQuotaExhausted) {
+    return null;
+  }
+
+  const aiClient = options.aiClient || ai;
+  const sleepFn = options.sleepFn || sleep;
+  if (!aiClient) {
+    console.warn(`  ⚠️ Gemini SDK 不可用，跳过 AI 总结 (${repoName})。`);
+    return null;
+  }
+
   const prompt = `你是一位技术项目分析师。根据以下 GitHub 项目信息，用中文写一段简洁的项目说明（2-3句话）。
 
 要求：
@@ -114,13 +185,18 @@ ${readmeSnippet || '无'}`;
       });
       return response.text.trim();
     } catch (err) {
-      const isRateLimit = err.message && (err.message.includes('429') || err.message.toLowerCase().includes('quota') || err.message.toLowerCase().includes('rate'));
-      if (isRateLimit && attempt < 2) {
+      if (isGeminiQuotaError(err)) {
+        geminiQuotaExhausted = true;
+        console.warn(`  ⚠️ Gemini 免费额度已耗尽，后续项目跳过 AI 总结 (${repoName})。`);
+        return null;
+      }
+
+      if (isGeminiRateLimitError(err) && attempt < 2) {
         console.warn(`  ⏳ Gemini 速率限制，等待 20 秒后重试 (${repoName})...`);
-        await sleep(20000);
+        await sleepFn(20000);
         continue;
       }
-      console.warn(`  ⚠️ 项目 ${repoName} AI 总结失败: ${err.message}`);
+      console.warn(`  ⚠️ 项目 ${repoName} AI 总结失败: ${getErrorMessage(err)}`);
       return null;
     }
   }
@@ -136,10 +212,15 @@ async function translateFallback(text) {
   }
 }
 
-async function enrichDescriptions(repos) {
+async function enrichDescriptions(repos, options = {}) {
   console.log('🌐 正在处理项目描述（AI 总结 → 机器翻译 → 原文）...');
 
-  const hasGemini = !!process.env.GEMINI_API_KEY;
+  const hasGemini = options.hasGemini ?? !!process.env.GEMINI_API_KEY;
+  const fetchSnippet = options.fetchSnippet || fetchReadmeSnippet;
+  const generateSummary = options.generateSummary || generateAISummary;
+  const translateText = options.translateText || translateFallback;
+  const sleepFn = options.sleepFn || sleep;
+
   if (!hasGemini) {
     console.warn('⚠️ 未设置 GEMINI_API_KEY，跳过 AI 总结，将使用机器翻译兜底。');
   }
@@ -151,26 +232,26 @@ async function enrichDescriptions(repos) {
     console.log(`  [${i + 1}/${repos.length}] 处理 ${repo.name}...`);
 
     // ── 第一层：Gemini AI 总结 ──
-    if (hasGemini) {
-      const readmeSnippet = await fetchReadmeSnippet(repo.url);
-      const summary = await generateAISummary(repo.description, readmeSnippet, repo.name);
+    if (hasGemini && !geminiQuotaExhausted) {
+      const readmeSnippet = await fetchSnippet(repo.url);
+      const summary = await generateSummary(repo.description, readmeSnippet, repo.name, { sleepFn });
       if (summary) {
         repo.description = summary;
         repo.descSource = 'ai';
         aiCount++;
         // Gemini 免费版限制 10 RPM，每次请求间隔 6.5 秒确保不超限
-        if (i < repos.length - 1) await sleep(6500);
+        if (i < repos.length - 1) await sleepFn(6500);
         continue;
       }
     }
 
     // ── 第二层：Google Translate 翻译兜底 ──
-    const translated = await translateFallback(repo.description);
+    const translated = await translateText(repo.description);
     if (translated) {
       repo.description = translated;
       repo.descSource = 'translate';
       translateCount++;
-      if (i < repos.length - 1) await sleep(300);
+      if (i < repos.length - 1) await sleepFn(300);
       continue;
     }
 
@@ -188,123 +269,147 @@ function sleep(ms) {
 }
 
 // ============================================================
-//  3. 格式化为 HTML
+//  3. 格式化为 HTML，并按 PushPlus 限制拆分
 // ============================================================
-function formatHTML(repos) {
-  const today = new Date().toLocaleDateString('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    timeZone: 'Asia/Shanghai',
-  });
-
-  // 语言对应颜色
-  const langColors = {
-    JavaScript: '#f1e05a',
-    TypeScript: '#3178c6',
-    Python: '#3572A5',
-    Java: '#b07219',
-    Go: '#00ADD8',
-    Rust: '#dea584',
-    'C++': '#f34b7d',
-    C: '#555555',
-    'C#': '#178600',
-    Ruby: '#701516',
-    PHP: '#4F5D95',
-    Swift: '#F05138',
-    Kotlin: '#A97BFF',
-    Dart: '#00B4AB',
-    Shell: '#89e051',
-    HTML: '#e34c26',
-    CSS: '#563d7c',
-    Vue: '#41b883',
-    Svelte: '#ff3e00',
-    Jupyter: '#DA5B0B',
+function getSourceLabel(source) {
+  const labels = {
+    ai: '🤖 AI总结',
+    translate: '🌐 机器翻译',
+    original: '🔤 原文',
   };
+  return labels[source] || 'ℹ️ 描述';
+}
 
-  let html = `
-<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; max-width: 800px; margin: 0 auto; background: #0d1117; color: #e6edf3; padding: 20px; border-radius: 12px;">
-  <div style="text-align: center; margin-bottom: 24px;">
-    <h1 style="color: #58a6ff; margin: 0; font-size: 22px;">🔥 GitHub Trending</h1>
-    <p style="color: #8b949e; margin: 6px 0 0 0; font-size: 13px;">${today} · 今日热门开源项目</p>
+function formatRepoCard(repo, options = {}) {
+  const descriptionLimit = options.descriptionLimit || DESCRIPTION_CHAR_LIMIT;
+  const meta = [
+    getSourceLabel(repo.descSource),
+    repo.language,
+    `⭐ ${repo.stars || 0}`,
+    `🍴 ${repo.forks || 0}`,
+    repo.todayStars ? `📈 ${repo.todayStars}` : '',
+  ].filter(Boolean);
+
+  return `
+  <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px;margin:0 0 10px">
+    <p style="margin:0 0 6px"><span style="color:#8b949e;font-size:13px;margin-right:6px">#${escapeHTML(repo.rank)}</span><a href="${escapeHTML(repo.url)}" style="color:#58a6ff;font-size:16px;font-weight:600;text-decoration:none">${escapeHTML(repo.name)}</a></p>
+    <p style="color:#c9d1d9;font-size:13px;line-height:1.55;margin:0 0 8px">${escapeHTML(truncateText(repo.description, descriptionLimit))}</p>
+    <p style="color:#8b949e;font-size:12px;margin:0">${meta.map(escapeHTML).join(' · ')}</p>
   </div>`;
+}
 
-  repos.forEach((repo) => {
-    const langDot = repo.language
-      ? `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${langColors[repo.language] || '#8b949e'};margin-right:4px;vertical-align:middle;"></span><span style="color:#8b949e;font-size:12px;margin-right:12px;">${repo.language}</span>`
-      : '';
+function formatHTML(repos, options = {}) {
+  const today = options.today || formatDate();
+  const pageLabel = options.pageLabel ? ` · ${options.pageLabel}` : '';
+  const cards = repos.map((repo) => formatRepoCard(repo, options)).join('');
 
-    const todayBadge = repo.todayStars
-      ? `<span style="color:#57ab5a;font-size:12px;">📈 ${repo.todayStars}</span>`
-      : '';
-
-    // 来源标识徽章
-    const sourceBadges = {
-      ai:        `<span style="display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;background:#1a237e;color:#82b1ff;margin-bottom:8px;">🤖 AI 总结</span>`,
-      translate: `<span style="display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;background:#1b2a3b;color:#90caf9;margin-bottom:8px;">🌐 机器翻译</span>`,
-      original:  `<span style="display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;background:#2d1b00;color:#ffb74d;margin-bottom:8px;">🔤 原文</span>`,
-    };
-    const sourceBadge = sourceBadges[repo.descSource] || '';
-
-    html += `
-  <div style="background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 12px;">
-    <div style="margin-bottom: 8px;">
-      <span style="color: #8b949e; font-size: 13px; margin-right: 8px;">#${repo.rank}</span>
-      <a href="${repo.url}" style="color: #58a6ff; font-size: 16px; font-weight: 600; text-decoration: none;">${repo.name}</a>
-    </div>
-    ${sourceBadge}
-    <p style="color: #c9d1d9; font-size: 13px; line-height: 1.6; margin: 0 0 10px 0;">${repo.description}</p>
-    <div style="display: flex; align-items: center; flex-wrap: wrap; gap: 8px;">
-      ${langDot}
-      <span style="color: #8b949e; font-size: 12px;">⭐ ${repo.stars}</span>
-      <span style="color: #8b949e; font-size: 12px;">🍴 ${repo.forks}</span>
-      ${todayBadge}
-    </div>
-  </div>`;
-  });
-
-  html += `
-  <div style="text-align: center; margin-top: 16px; padding-top: 16px; border-top: 1px solid #30363d;">
-    <a href="https://github.com/trending" style="color: #58a6ff; font-size: 13px; text-decoration: none;">在 GitHub 上查看完整列表 →</a>
-  </div>
+  return `
+<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;background:#0d1117;color:#e6edf3;padding:16px">
+  <div style="text-align:center;margin:0 0 16px">
+    <h1 style="color:#58a6ff;margin:0;font-size:22px">🔥 GitHub Trending</h1>
+    <p style="color:#8b949e;margin:6px 0 0;font-size:13px">${escapeHTML(today)} · 今日热门开源项目${escapeHTML(pageLabel)}</p>
+  </div>${cards}
+  <p style="text-align:center;margin:14px 0 0;padding-top:14px;border-top:1px solid #30363d"><a href="https://github.com/trending" style="color:#58a6ff;font-size:13px;text-decoration:none">在 GitHub 上查看完整列表 →</a></p>
 </div>`;
+}
 
-  return html;
+function buildPushMessages(repos, options = {}) {
+  const contentLimit = options.contentLimit || PUSHPLUS_CONTENT_LIMIT;
+  const today = options.today || formatDate();
+  const chunks = [];
+  let currentChunk = [];
+
+  for (const repo of repos) {
+    const candidate = [...currentChunk, repo];
+    const candidateHtml = formatHTML(candidate, {
+      ...options,
+      today,
+      pageLabel: '第 999/999 条',
+    });
+
+    if (currentChunk.length > 0 && candidateHtml.length >= contentLimit) {
+      chunks.push(currentChunk);
+      currentChunk = [repo];
+      const singleHtml = formatHTML(currentChunk, {
+        ...options,
+        today,
+        pageLabel: '第 999/999 条',
+      });
+      if (singleHtml.length >= contentLimit) {
+        throw new Error(`单个项目内容仍超过 PushPlus 安全上限：${repo.name}`);
+      }
+      continue;
+    }
+
+    if (currentChunk.length === 0 && candidateHtml.length >= contentLimit) {
+      throw new Error(`单个项目内容仍超过 PushPlus 安全上限：${repo.name}`);
+    }
+
+    currentChunk = candidate;
+  }
+
+  if (currentChunk.length > 0) {
+    chunks.push(currentChunk);
+  }
+
+  const total = chunks.length;
+  return chunks.map((chunk, index) => {
+    const pageSuffix = total > 1 ? ` · ${index + 1}/${total}` : '';
+    return {
+      title: `🔥 GitHub Trending · ${today}${pageSuffix}`,
+      content: formatHTML(chunk, {
+        ...options,
+        today,
+        pageLabel: total > 1 ? `第 ${index + 1}/${total} 条` : '',
+      }),
+      repos: chunk,
+    };
+  });
 }
 
 // ============================================================
 //  4. 通过 PushPlus 推送到微信
 // ============================================================
-async function pushToWechat(html) {
-  if (!PUSHPLUS_TOKEN) {
+async function pushToWechat(messages, options = {}) {
+  const token = options.token ?? PUSHPLUS_TOKEN;
+  const httpClient = options.httpClient || axios;
+  const contentLimit = options.contentLimit || PUSHPLUS_CONTENT_LIMIT;
+  const pushMessages = Array.isArray(messages) ? messages : [{
+    title: `🔥 GitHub Trending · ${formatDate()}`,
+    content: messages,
+  }];
+
+  if (!token) {
     console.error('❌ 未设置 PUSHPLUS_TOKEN 环境变量！');
     console.log('📋 请设置环境变量后重试：');
     console.log('   Windows:  set PUSHPLUS_TOKEN=你的token');
     console.log('   Linux/Mac: export PUSHPLUS_TOKEN=你的token');
-    process.exit(1);
+    throw new Error('未设置 PUSHPLUS_TOKEN 环境变量');
   }
 
-  const today = new Date().toLocaleDateString('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    timeZone: 'Asia/Shanghai',
-  });
+  console.log(`📤 正在推送到微信，共 ${pushMessages.length} 条 ...`);
 
-  console.log('📤 正在推送到微信 ...');
+  for (let i = 0; i < pushMessages.length; i++) {
+    const message = pushMessages[i];
+    const contentLength = message.content.length;
+    console.log(`  📦 第 ${i + 1}/${pushMessages.length} 条内容长度：${contentLength}/${contentLimit}`);
 
-  const res = await axios.post(PUSHPLUS_API, {
-    token: PUSHPLUS_TOKEN,
-    title: `🔥 GitHub Trending · ${today}`,
-    content: html,
-    template: 'html',
-  });
+    if (contentLength >= contentLimit) {
+      throw new Error(`第 ${i + 1} 条内容长度 ${contentLength} 超过 PushPlus 安全上限 ${contentLimit}`);
+    }
 
-  if (res.data && res.data.code === 200) {
-    console.log('✅ 推送成功！消息流水号:', res.data.data);
-  } else {
-    console.error('❌ 推送失败:', JSON.stringify(res.data));
-    process.exit(1);
+    const res = await httpClient.post(PUSHPLUS_API, {
+      token,
+      title: message.title,
+      content: message.content,
+      template: 'html',
+    });
+
+    if (res.data && res.data.code === 200) {
+      console.log(`  ✅ 第 ${i + 1}/${pushMessages.length} 条推送成功！消息流水号:`, res.data.data);
+    } else {
+      throw new Error(`推送失败: ${JSON.stringify(res.data)}`);
+    }
   }
 }
 
@@ -323,22 +428,27 @@ async function main() {
     // 翻译描述为中文
     repos = await enrichDescriptions(repos);
 
-    const html = formatHTML(repos);
+    const messages = buildPushMessages(repos);
 
     // 本地调试：如果传入 --dry-run 参数，只打印不推送
     if (process.argv.includes('--dry-run')) {
       console.log('\n--- 预览 (dry-run 模式，不推送) ---\n');
       console.log(`共 ${repos.length} 个项目：`);
+      console.log(`预计推送 ${messages.length} 条，安全上限 ${PUSHPLUS_CONTENT_LIMIT} 字符/条：`);
+      messages.forEach((message, index) => {
+        console.log(`  第 ${index + 1}/${messages.length} 条：${message.content.length}/${PUSHPLUS_CONTENT_LIMIT} 字符，${message.repos.length} 个项目`);
+      });
+      console.log('');
       const sourceLabel = { ai: '🤖 AI总结', translate: '🌐 机器翻译', original: '🔤 原文' };
       repos.forEach((r) => {
         console.log(`  #${r.rank} ${r.name} ⭐${r.stars}  [${sourceLabel[r.descSource] || '?'}]`);
-        console.log(`       ${r.description}`);
+        console.log(`       ${truncateText(r.description)}`);
         console.log('');
       });
       return;
     }
 
-    await pushToWechat(html);
+    await pushToWechat(messages);
     console.log('🎉 全部完成！');
   } catch (err) {
     console.error('❌ 运行出错:', err.message);
@@ -346,4 +456,19 @@ async function main() {
   }
 }
 
-main();
+if (require.main === module) {
+  main();
+}
+
+module.exports = {
+  buildPushMessages,
+  enrichDescriptions,
+  escapeHTML,
+  formatHTML,
+  formatRepoCard,
+  generateAISummary,
+  isGeminiQuotaError,
+  pushToWechat,
+  resetGeminiQuotaState,
+  truncateText,
+};
