@@ -1,17 +1,25 @@
 {
   "name": "github-trending-push",
   "version": "1.0.0",
-  "description": "每日自动爬取 GitHub Trending 并推送到微信",
+  "description": "每日抓取 GitHub Trending，去重后推送到 QQ 并归档到 Obsidian",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
     "test": "node src/index.test.js"
   },
-  "keywords": ["github", "trending", "pushplus", "wechat"],
+  "keywords": [
+    "github",
+    "trending",
+    "qqbot",
+    "obsidian",
+    "pushplus",
+    "wechat"
+  ],
   "author": "",
   "license": "MIT",
   "dependencies": {
     "@google/genai": "^1.0.0",
+    "@tencent-connect/qqbot-nodejs": "^1.0.4",
     "axios": "^1.7.0",
     "cheerio": "^1.0.0",
     "google-translate-api-x": "^10.7.0"

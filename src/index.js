@@ -1,6 +1,17 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
+const path = require('node:path');
 const translate = require('google-translate-api-x');
+const {
+  classifyRepos,
+  formatDateKey,
+  loadArchiveState,
+  loadQQTarget,
+  saveArchiveState,
+  saveDailyArchive,
+  updateStateAfterSuccessfulPush,
+} = require('./archive');
+const { buildQQMessages, pushToQQ } = require('./qq');
 
 let GoogleGenAI = null;
 try {
@@ -179,7 +190,7 @@ ${readmeSnippet || '无'}`;
   // 最多重试 2 次（首次 + 1次重试）
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
-      const response = await ai.models.generateContent({
+      const response = await aiClient.models.generateContent({
         model: 'gemini-2.5-flash',
         contents: prompt,
       });
@@ -276,6 +287,7 @@ function getSourceLabel(source) {
     ai: '🤖 AI总结',
     translate: '🌐 机器翻译',
     original: '🔤 原文',
+    history: '🗂️ 历史中文说明',
   };
   return labels[source] || 'ℹ️ 描述';
 }
@@ -417,42 +429,91 @@ async function pushToWechat(messages, options = {}) {
 //  主流程
 // ============================================================
 async function main() {
+  const dryRun = process.argv.includes('--dry-run');
+  const today = formatDateKey();
+  const archiveRoot = process.env.TRENDING_ARCHIVE_DIR
+    ? path.resolve(process.env.TRENDING_ARCHIVE_DIR)
+    : null;
+  let repos = [];
+  let state = loadArchiveState(archiveRoot);
+  let pushStatus = dryRun ? 'dry-run' : 'failed';
+  let pushError = null;
+
   try {
-    let repos = await scrapeTrending();
+    repos = await scrapeTrending();
 
     if (repos.length === 0) {
-      console.error('❌ 未爬取到任何项目，可能页面结构已变更');
-      process.exit(1);
+      throw new Error('未爬取到任何项目，可能页面结构已变更');
     }
 
-    // 翻译描述为中文
-    repos = await enrichDescriptions(repos);
+    repos = classifyRepos(repos, state, {
+      dedupDays: Number.parseInt(process.env.DEDUP_DAYS || '7', 10),
+    });
+    const newRepos = repos.filter((repo) => repo.deliveryStatus === 'new');
+    const duplicateCount = repos.length - newRepos.length;
+    console.log(`🧹 去重完成 — 新项目: ${newRepos.length}，近 7 天重复: ${duplicateCount}`);
 
-    const messages = buildPushMessages(repos);
+    // 只处理将要推送的新项目；重复项目复用历史中文说明。
+    if (newRepos.length > 0) {
+      await enrichDescriptions(newRepos);
+    }
+
+    const qqMessages = buildQQMessages(newRepos, { today, date: today });
 
     // 本地调试：如果传入 --dry-run 参数，只打印不推送
-    if (process.argv.includes('--dry-run')) {
+    if (dryRun) {
       console.log('\n--- 预览 (dry-run 模式，不推送) ---\n');
-      console.log(`共 ${repos.length} 个项目：`);
-      console.log(`预计推送 ${messages.length} 条，安全上限 ${PUSHPLUS_CONTENT_LIMIT} 字符/条：`);
-      messages.forEach((message, index) => {
-        console.log(`  第 ${index + 1}/${messages.length} 条：${message.content.length}/${PUSHPLUS_CONTENT_LIMIT} 字符，${message.repos.length} 个项目`);
+      console.log(`完整榜单 ${repos.length} 个；新项目 ${newRepos.length} 个；重复 ${duplicateCount} 个。`);
+      console.log(`预计发送 ${qqMessages.length} 条 QQ 消息：`);
+      qqMessages.forEach((message, index) => {
+        console.log(`  第 ${index + 1}/${qqMessages.length} 条：${Array.from(message).length} 字符`);
       });
       console.log('');
-      const sourceLabel = { ai: '🤖 AI总结', translate: '🌐 机器翻译', original: '🔤 原文' };
+      const sourceLabel = { ai: '🤖 AI总结', translate: '🌐 机器翻译', original: '🔤 原文', history: '🗂️ 历史说明' };
       repos.forEach((r) => {
-        console.log(`  #${r.rank} ${r.name} ⭐${r.stars}  [${sourceLabel[r.descSource] || '?'}]`);
+        const status = r.deliveryStatus === 'new' ? '🆕' : '🔁';
+        console.log(`  ${status} #${r.rank} ${r.name} ⭐${r.stars}  [${sourceLabel[r.descSource] || '原文'}]`);
         console.log(`       ${truncateText(r.description)}`);
         console.log('');
       });
-      return;
-    }
+    } else {
+      const target = loadQQTarget(archiveRoot);
+      if (process.env.QQ_BOT_APP_ID && process.env.QQ_BOT_APP_SECRET) {
+        await pushToQQ(qqMessages, { targetOpenid: target?.openid });
+      } else if (PUSHPLUS_TOKEN) {
+        // 兼容旧配置，但同样只推送去重后的新项目。
+        if (newRepos.length === 0) {
+          await pushToWechat('<p>今日暂无新上榜项目（已排除近 7 天推荐过的项目）。</p>');
+        } else {
+          await pushToWechat(buildPushMessages(newRepos, { today }));
+        }
+      } else {
+        throw new Error('未配置 QQ 机器人，也没有可用的 PUSHPLUS_TOKEN');
+      }
+      pushStatus = 'success';
 
-    await pushToWechat(messages);
-    console.log('🎉 全部完成！');
+      state = updateStateAfterSuccessfulPush(state, repos, {
+        pushedAt: new Date().toISOString(),
+      });
+      if (archiveRoot) saveArchiveState(archiveRoot, state);
+      console.log('🎉 推送完成！');
+    }
   } catch (err) {
+    pushError = err;
     console.error('❌ 运行出错:', err.message);
-    process.exit(1);
+  } finally {
+    if (archiveRoot && repos.length > 0) {
+      const filePath = saveDailyArchive(archiveRoot, repos, {
+        date: today,
+        pushStatus,
+        pushError: pushError?.message,
+      });
+      console.log(`🗂️ 完整榜单已保存：${filePath}`);
+    }
+  }
+
+  if (pushError) {
+    process.exitCode = 1;
   }
 }
 
@@ -462,6 +523,8 @@ if (require.main === module) {
 
 module.exports = {
   buildPushMessages,
+  buildQQMessages,
+  classifyRepos,
   enrichDescriptions,
   escapeHTML,
   formatHTML,
@@ -469,6 +532,8 @@ module.exports = {
   generateAISummary,
   isGeminiQuotaError,
   pushToWechat,
+  pushToQQ,
   resetGeminiQuotaState,
+  scrapeTrending,
   truncateText,
 };

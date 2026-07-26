@@ -1,62 +1,108 @@
-# 🔥 GitHub Trending 每日推送
+# 🔥 GitHub Trending 每日 QQ 推送
 
-每天自动爬取 [GitHub Trending](https://github.com/trending)，将热门开源项目推送到微信。
+每天由 GitHub Actions 自动抓取 GitHub Trending，排除最近 7 天已经推荐过的项目，只把新项目推送到 QQ 私聊，同时将完整榜单保存为 Obsidian Markdown。
 
 ## 功能
 
-- 📊 自动爬取 GitHub Trending 页面
-- 📝 提取项目名、描述、编程语言、Star/Fork 数
-- 🎨 格式化为美观的 HTML 卡片
-- 📱 通过 PushPlus 推送到微信
-- ⏰ GitHub Actions 每日定时执行（北京时间 9:00）
-- 🖱️ 支持手动触发
+- 📊 抓取 GitHub Trending 完整日榜
+- 🧹 按规范化后的 `owner/repo` 做 7 天滚动去重
+- 🤖 使用 Gemini 生成中文项目说明，失败时自动降级到机器翻译或原文
+- 📱 通过 QQ 开放平台官方机器人推送到手机 QQ
+- 🗂️ 每天保存完整 Obsidian 榜单，并标记“已推送”或“重复未推送”
+- 🔒 QQ OpenID 和去重状态仅保存在私有 Vault 仓库
+- ⏰ GitHub Actions 每天北京时间 20:00 自动执行
+- 🧩 保留 PushPlus 作为可选兼容通道
 
-## 快速开始
+## 数据流
 
-### 1. 配置 PushPlus
+```text
+GitHub Actions
+  ├─ 抓取当天完整榜单
+  ├─ 读取 Vault 中的最近推送状态
+  ├─ 只处理并推送新项目
+  └─ 将完整日榜提交到 Vault 私库
+```
 
-1. 访问 [pushplus.plus](https://www.pushplus.plus/)
-2. 微信扫码登录
-3. 从个人中心复制 Token
+Vault 仓库中的文件结构：
 
-### 2. 配置 GitHub Secrets
+```text
+├─ .github-trending/
+│  ├─ qq-target.json     # 已绑定的 QQ OpenID（私库）
+│  └─ state.json         # 去重状态和历史中文说明
+└─ 2026/
+   ├─ 2026-07-25.md
+   └─ 2026-07-26.md
+```
 
-在仓库 **Settings → Secrets and variables → Actions** 中添加：
+## 1. 配置 QQ 机器人
 
-| Name | Value |
-|------|-------|
-| `PUSHPLUS_TOKEN` | 你的 PushPlus Token |
+在 [QQ 开放平台](https://q.qq.com/) 打开已经创建的机器人，取得 `AppID` 和 `AppSecret`。`AppSecret` 不要写入代码或聊天记录。
 
-### 3. 手动测试
+在推送项目 `Big-Light/github-trending-push` 的 **Settings → Secrets and variables → Actions** 中创建：
 
-在仓库的 **Actions** 标签页，选择工作流，点击 **Run workflow** 手动触发一次。
+| Secret | 用途 |
+|---|---|
+| `QQ_BOT_APP_ID` | QQ 机器人 AppID |
+| `QQ_BOT_APP_SECRET` | QQ 机器人 AppSecret |
+| `OBSIDIAN_REPO_TOKEN` | 只允许读写 Vault 私库的细粒度 Token |
+| `GEMINI_API_KEY` | 可选，用于 AI 中文总结 |
+
+`OBSIDIAN_REPO_TOKEN` 建议使用 fine-grained personal access token，只授权 `Big-Light/github-trending-obsidian`，Repository permissions 中仅开启 **Contents: Read and write**。
+
+## 2. 首次绑定手机 QQ
+
+1. 打开推送项目的 **Actions**。
+2. 选择 **绑定 QQ 机器人私聊**，点击 **Run workflow**。
+3. 等待日志出现“请在手机 QQ 中向机器人发送”。
+4. 在 3 分钟内向机器人发送：`绑定 GitHub Trending`。
+5. 机器人回复绑定成功后，OpenID 会写入 Vault 私库的 `.github-trending/qq-target.json`。
+
+完整 OpenID 不会打印到公开 Actions 日志。
+
+## 3. 测试每日任务
+
+在 Actions 中选择 **每日 GitHub Trending 推送**，手动运行一次。首次运行时，最近 7 天没有历史记录，因此当天榜单都会被视为新项目。
+
+随后检查：
+
+- 手机 QQ 是否收到新项目消息；
+- Vault 私库是否出现 `YYYY/YYYY-MM-DD.md`；
+- `.github-trending/state.json` 是否生成；
+- 重复手动运行时，QQ 是否只收到“今日暂无新上榜项目”。
+
+QQ 主动消息受开放平台额度和风控约束。如果 Actions 显示发送成功但手机没有收到，请先在手机上给机器人发送一条消息，再重新测试。
 
 ## 本地运行
 
 ```bash
-# 安装依赖
 npm install
 
-# 仅预览，不推送
+# 只预览，不推送、不更新去重状态
 node src/index.js --dry-run
-
-# 实际推送（需要设置环境变量）
-# Windows
-set PUSHPLUS_TOKEN=你的token
-node src/index.js
-
-# Linux/Mac
-export PUSHPLUS_TOKEN=你的token
-node src/index.js
 ```
 
-## 项目结构
+如果需要在本地真实推送，设置：
 
+```text
+QQ_BOT_APP_ID
+QQ_BOT_APP_SECRET
+QQ_BOT_TARGET_OPENID
+TRENDING_ARCHIVE_DIR
 ```
-├── .github/workflows/
-│   └── daily-trending.yml   # GitHub Actions 定时任务
-├── src/
-│   └── index.js             # 主脚本
-├── package.json
-└── README.md
+
+GitHub Actions 使用私有 Vault 中的绑定文件，因此不需要配置 `QQ_BOT_TARGET_OPENID`。
+
+## 可调参数
+
+| 环境变量 | 默认值 | 说明 |
+|---|---:|---|
+| `DEDUP_DAYS` | `7` | 去重窗口天数 |
+| `QQ_CONTENT_LIMIT` | `1800` | 单条 QQ 文本安全长度 |
+| `DESCRIPTION_CHAR_LIMIT` | `220` | 项目说明展示长度 |
+| `TRENDING_ARCHIVE_DIR` | 无 | Vault 私库在运行器中的路径 |
+
+## 测试
+
+```bash
+npm test
 ```

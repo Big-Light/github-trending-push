@@ -1,19 +1,16 @@
-name: 每日 GitHub Trending 推送
+name: 绑定 QQ 机器人私聊
 
 on:
-  schedule:
-    # UTC 12:00 = 北京时间 20:00
-    - cron: '0 12 * * *'
   workflow_dispatch:
 
 concurrency:
-  group: daily-github-trending
-  cancel-in-progress: false
+  group: bind-qq-bot
+  cancel-in-progress: true
 
 jobs:
-  scrape-push-and-archive:
+  bind:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 6
 
     steps:
       - name: 📥 拉取推送项目
@@ -36,26 +33,19 @@ jobs:
       - name: 📦 安装依赖
         run: npm ci
 
-      - name: 🚀 爬取、去重并推送到 QQ
+      - name: 🔗 等待手机 QQ 绑定消息
         env:
           QQ_BOT_APP_ID: ${{ secrets.QQ_BOT_APP_ID }}
           QQ_BOT_APP_SECRET: ${{ secrets.QQ_BOT_APP_SECRET }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TRENDING_ARCHIVE_DIR: .vault
-          DEDUP_DAYS: '7'
-        run: node src/index.js
+        run: node src/bind-qq.js --timeout 180
 
-      - name: 💾 保存完整榜单到 Vault 私库
-        if: always()
+      - name: 🔒 将绑定信息保存到 Vault 私库
         working-directory: .vault
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add --all
-          if git diff --cached --quiet; then
-            echo "Vault 没有变化"
-            exit 0
-          fi
-          git commit -m "archive: GitHub Trending $(date -u +'%Y-%m-%d')"
+          git add .github-trending/qq-target.json
+          git commit -m "config: bind QQ private chat target"
           git push origin HEAD:master

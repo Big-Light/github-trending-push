@@ -1,12 +1,21 @@
 const assert = require('node:assert/strict');
 
 const {
+  buildQQMessages,
   buildPushMessages,
+  classifyRepos,
   generateAISummary,
+  pushToQQ,
   pushToWechat,
   resetGeminiQuotaState,
   truncateText,
 } = require('./index');
+const {
+  createEmptyState,
+  formatObsidianMarkdown,
+  updateStateAfterSuccessfulPush,
+} = require('./archive');
+const { waitForQQBinding } = require('./qq');
 
 function makeRepos(count, description) {
   return Array.from({ length: count }, (_, index) => ({
@@ -67,6 +76,99 @@ async function run() {
 
   assert.equal(calls.length, 2);
   assert.ok(calls.every((call) => call.payload.template === 'html'));
+
+  const history = {
+    version: 1,
+    repos: {
+      'owner/repo-1': {
+        pushedAt: '2026-05-19T01:00:00.000Z',
+        localizedDescription: '历史中文说明',
+        descSource: 'ai',
+      },
+      'owner/repo-2': {
+        pushedAt: '2026-05-01T01:00:00.000Z',
+      },
+    },
+  };
+  const classified = classifyRepos(makeRepos(3, 'original'), history, {
+    now: new Date('2026-05-20T01:00:00.000Z'),
+    dedupDays: 7,
+  });
+  assert.equal(classified[0].deliveryStatus, 'duplicate');
+  assert.equal(classified[0].description, '历史中文说明');
+  assert.equal(classified[1].deliveryStatus, 'new');
+  assert.equal(classified[2].deliveryStatus, 'new');
+
+  classified[1].description = '新的中文说明';
+  classified[1].descSource = 'translate';
+  const updatedState = updateStateAfterSuccessfulPush(history, classified, {
+    pushedAt: '2026-05-20T02:00:00.000Z',
+  });
+  assert.equal(updatedState.repos['owner/repo-1'].pushedAt, '2026-05-19T01:00:00.000Z');
+  assert.equal(updatedState.repos['owner/repo-2'].pushedAt, '2026-05-20T02:00:00.000Z');
+  assert.equal(updatedState.repos['owner/repo-2'].localizedDescription, '新的中文说明');
+
+  const markdown = formatObsidianMarkdown(classified, {
+    date: '2026-05-20',
+    pushStatus: 'success',
+  });
+  assert.match(markdown, /duplicate_count: 1/);
+  assert.match(markdown, /近 7 天已推荐，本次未推送/);
+  assert.match(markdown, /新项目，已推送到 QQ/);
+
+  const qqMessages = buildQQMessages(classified.filter((repo) => repo.deliveryStatus === 'new'), {
+    date: '2026-05-20',
+    contentLimit: 650,
+  });
+  assert.ok(qqMessages.length >= 1);
+  assert.ok(qqMessages.every((message) => Array.from(message).length <= 650));
+  assert.match(buildQQMessages([], { date: '2026-05-20' })[0], /今日暂无新上榜项目/);
+
+  const qqCalls = [];
+  await pushToQQ(qqMessages, {
+    appId: 'test-app',
+    appSecret: 'test-secret',
+    targetOpenid: 'test-openid',
+    contentLimit: 650,
+    botFactory: async () => ({
+      sendText: async (target, content) => {
+        qqCalls.push({ target, content });
+        return { id: `qq-${qqCalls.length}` };
+      },
+    }),
+  });
+  assert.equal(qqCalls.length, qqMessages.length);
+  assert.ok(qqCalls.every((call) => call.target.scope === 'c2c'));
+
+  const bindingHandlers = {};
+  let resolveBotStart;
+  const fakeBindingBot = {
+    on: (event, handler) => {
+      bindingHandlers[event] = handler;
+    },
+    start: () => new Promise((resolve) => {
+      resolveBotStart = resolve;
+    }),
+    stop: () => resolveBotStart?.(),
+    sendText: async () => ({ id: 'binding-confirmation' }),
+  };
+  const bindingPromise = waitForQQBinding({
+    appId: 'test-app',
+    appSecret: 'test-secret',
+    timeoutMs: 1000,
+    botFactory: async () => fakeBindingBot,
+  });
+  setImmediate(() => bindingHandlers.message({}, {
+    content: '绑定 GitHub Trending',
+    senderId: 'private-openid',
+    senderName: 'tester',
+    messageId: 'incoming-message',
+    replyTarget: { scope: 'c2c', targetId: 'private-openid', msgId: 'incoming-message' },
+  }));
+  const binding = await bindingPromise;
+  assert.equal(binding.openid, 'private-openid');
+
+  assert.deepEqual(createEmptyState(), { version: 1, repos: {} });
 
   resetGeminiQuotaState();
   let geminiCalls = 0;
