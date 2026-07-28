@@ -2,8 +2,8 @@ name: 每日 GitHub Trending 推送
 
 on:
   schedule:
-    # UTC 12:00 = 北京时间 20:00
-    - cron: '0 12 * * *'
+    # UTC 4:17 = 北京时间 12:17；避开整点的 GitHub Actions 高峰
+    - cron: '17 4 * * *'
   workflow_dispatch:
 
 concurrency:

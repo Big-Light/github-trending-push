@@ -89,9 +89,11 @@ async function pushToQQ(messages, options = {}) {
     if (Array.from(content).length > (options.contentLimit || DEFAULT_QQ_CONTENT_LIMIT)) {
       throw new Error(`第 ${index + 1} 条 QQ 消息超过内容上限`);
     }
-    const result = await bot.sendText({ scope: 'c2c', targetId: targetOpenid }, content);
+    const result = await bot.sendWakeup({ scope: 'c2c', targetId: targetOpenid }, content);
     results.push(result);
-    console.log(`  ✅ 第 ${index + 1}/${payloads.length} 条发送成功`);
+    const messageId = result?.id || result?.message_id || result?.messageId;
+    const receipt = messageId ? `，消息 ID: ${messageId}` : '，QQ API 未返回消息 ID';
+    console.log(`  ✅ 第 ${index + 1}/${payloads.length} 条主动唤醒请求成功${receipt}`);
   }
   return results;
 }

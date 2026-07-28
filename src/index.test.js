@@ -131,7 +131,7 @@ async function run() {
     targetOpenid: 'test-openid',
     contentLimit: 650,
     botFactory: async () => ({
-      sendText: async (target, content) => {
+      sendWakeup: async (target, content) => {
         qqCalls.push({ target, content });
         return { id: `qq-${qqCalls.length}` };
       },
