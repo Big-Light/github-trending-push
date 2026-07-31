@@ -68,6 +68,19 @@ function buildQQMessages(repos, options = {}) {
   });
 }
 
+function getQQDeliveryHint(error) {
+  const code = Number(error?.bizCode);
+  const hints = {
+    40034100: '主动消息发送频率已达上限，请稍后重试。',
+    40034105: '机器人没有主动消息权限，请检查 QQ 开放平台配置。',
+    40034122: '互动召回额度已达上限；每日榜单应使用普通主动消息，而不是主动唤醒消息。',
+    40054004: '机器人与目标用户没有好友关系，请重新完成私聊绑定。',
+    40054013: '用户已拒绝机器人消息，请在手机 QQ 的机器人会话设置中开启“允许主动发送”。',
+    40054016: '机器人当前处于离线状态，请检查 QQ 开放平台中的机器人状态。',
+  };
+  return hints[code] ? `QQ 错误码 ${code}：${hints[code]}` : null;
+}
+
 async function pushToQQ(messages, options = {}) {
   const appId = options.appId || process.env.QQ_BOT_APP_ID;
   const appSecret = options.appSecret || process.env.QQ_BOT_APP_SECRET;
@@ -89,11 +102,20 @@ async function pushToQQ(messages, options = {}) {
     if (Array.from(content).length > (options.contentLimit || DEFAULT_QQ_CONTENT_LIMIT)) {
       throw new Error(`第 ${index + 1} 条 QQ 消息超过内容上限`);
     }
-    const result = await bot.sendWakeup({ scope: 'c2c', targetId: targetOpenid }, content);
+    let result;
+    try {
+      result = await bot.sendText({ scope: 'c2c', targetId: targetOpenid }, content);
+    } catch (error) {
+      const hint = getQQDeliveryHint(error);
+      if (hint) {
+        throw new Error(`${error.message}\n💡 ${hint}`, { cause: error });
+      }
+      throw error;
+    }
     results.push(result);
     const messageId = result?.id || result?.message_id || result?.messageId;
     const receipt = messageId ? `，消息 ID: ${messageId}` : '，QQ API 未返回消息 ID';
-    console.log(`  ✅ 第 ${index + 1}/${payloads.length} 条主动唤醒请求成功${receipt}`);
+    console.log(`  ✅ 第 ${index + 1}/${payloads.length} 条主动消息请求成功${receipt}`);
   }
   return results;
 }
@@ -162,6 +184,7 @@ module.exports = {
   buildQQMessages,
   createQQBot,
   formatQQRepo,
+  getQQDeliveryHint,
   pushToQQ,
   waitForQQBinding,
 };

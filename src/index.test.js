@@ -15,7 +15,7 @@ const {
   formatObsidianMarkdown,
   updateStateAfterSuccessfulPush,
 } = require('./archive');
-const { waitForQQBinding } = require('./qq');
+const { getQQDeliveryHint, waitForQQBinding } = require('./qq');
 
 function makeRepos(count, description) {
   return Array.from({ length: count }, (_, index) => ({
@@ -131,7 +131,7 @@ async function run() {
     targetOpenid: 'test-openid',
     contentLimit: 650,
     botFactory: async () => ({
-      sendWakeup: async (target, content) => {
+      sendText: async (target, content) => {
         qqCalls.push({ target, content });
         return { id: `qq-${qqCalls.length}` };
       },
@@ -139,6 +139,21 @@ async function run() {
   });
   assert.equal(qqCalls.length, qqMessages.length);
   assert.ok(qqCalls.every((call) => call.target.scope === 'c2c'));
+  assert.match(getQQDeliveryHint({ bizCode: 40054013 }), /允许主动发送/);
+  assert.equal(getQQDeliveryHint({ bizCode: 12345 }), null);
+
+  await assert.rejects(pushToQQ(['test'], {
+    appId: 'test-app',
+    appSecret: 'test-secret',
+    targetOpenid: 'test-openid',
+    botFactory: async () => ({
+      sendText: async () => {
+        const error = new Error('消息发送失败');
+        error.bizCode = 40054013;
+        throw error;
+      },
+    }),
+  }), /允许主动发送/);
 
   const bindingHandlers = {};
   let resolveBotStart;
