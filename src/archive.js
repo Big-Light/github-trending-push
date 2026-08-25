@@ -4,7 +4,7 @@ const path = require('node:path');
 const STATE_DIRECTORY = '.github-trending';
 const STATE_FILE = 'state.json';
 const QQ_TARGET_FILE = 'qq-target.json';
-const DEFAULT_DEDUP_DAYS = Number.parseInt(process.env.DEDUP_DAYS || '7', 10);
+const DEFAULT_DEDUP_DAYS = Number.parseInt(process.env.DEDUP_DAYS || '30', 10);
 
 function formatDateKey(date = new Date()) {
   const parts = new Intl.DateTimeFormat('en-CA', {
@@ -143,7 +143,7 @@ function cleanMarkdownText(value) {
 }
 
 function statusLabel(repo, pushStatus) {
-  if (repo.deliveryStatus === 'duplicate') return '🔁 近 7 天已推荐，本次未推送';
+  if (repo.deliveryStatus === 'duplicate') return '🔁 近 30 天已推荐，本次未推送';
   if (pushStatus === 'success') return '🆕 新项目，已推送到 QQ';
   if (pushStatus === 'dry-run') return '🧪 新项目，预览模式未推送';
   return '⚠️ 新项目，QQ 推送失败，下次继续重试';
@@ -170,7 +170,7 @@ function formatObsidianMarkdown(repos, options = {}) {
     '',
     `# GitHub Trending · ${date}`,
     '',
-    `> 共 ${repos.length} 个项目；新项目 ${newCount} 个；近 7 天重复 ${duplicateCount} 个。`,
+    `> 共 ${repos.length} 个项目；新项目 ${newCount} 个；近 30 天重复 ${duplicateCount} 个。`,
   ];
 
   if (errorMessage) {

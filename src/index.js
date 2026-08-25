@@ -447,11 +447,11 @@ async function main() {
     }
 
     repos = classifyRepos(repos, state, {
-      dedupDays: Number.parseInt(process.env.DEDUP_DAYS || '7', 10),
+      dedupDays: Number.parseInt(process.env.DEDUP_DAYS || '30', 10),
     });
     const newRepos = repos.filter((repo) => repo.deliveryStatus === 'new');
     const duplicateCount = repos.length - newRepos.length;
-    console.log(`🧹 去重完成 — 新项目: ${newRepos.length}，近 7 天重复: ${duplicateCount}`);
+    console.log(`🧹 去重完成 — 新项目: ${newRepos.length}，近 30 天重复: ${duplicateCount}`);
 
     // 只处理将要推送的新项目；重复项目复用历史中文说明。
     if (newRepos.length > 0) {
@@ -483,7 +483,7 @@ async function main() {
       } else if (PUSHPLUS_TOKEN) {
         // 兼容旧配置，但同样只推送去重后的新项目。
         if (newRepos.length === 0) {
-          await pushToWechat('<p>今日暂无新上榜项目（已排除近 7 天推荐过的项目）。</p>');
+          await pushToWechat('<p>今日暂无新上榜项目（已排除近 30 天推荐过的项目）。</p>');
         } else {
           await pushToWechat(buildPushMessages(newRepos, { today }));
         }

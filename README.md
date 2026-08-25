@@ -1,11 +1,11 @@
 # 🔥 GitHub Trending 每日 QQ 推送
 
-每天由 GitHub Actions 自动抓取 GitHub Trending，排除最近 7 天已经推荐过的项目，只把新项目推送到 QQ 私聊，同时将完整榜单保存为 Obsidian Markdown。
+每天由 GitHub Actions 自动抓取 GitHub Trending，排除最近 30 天已经推荐过的项目，只把新项目推送到 QQ 私聊，同时将完整榜单保存为 Obsidian Markdown。
 
 ## 功能
 
 - 📊 抓取 GitHub Trending 完整日榜
-- 🧹 按规范化后的 `owner/repo` 做 7 天滚动去重
+- 🧹 按规范化后的 `owner/repo` 做 30 天滚动去重
 - 🤖 使用 Gemini 生成中文项目说明，失败时自动降级到机器翻译或原文
 - 📱 通过 QQ 开放平台官方机器人推送到手机 QQ
 - 🗂️ 每天保存完整 Obsidian 榜单，并标记“已推送”或“重复未推送”
@@ -61,7 +61,7 @@ Vault 仓库中的文件结构：
 
 ## 3. 测试每日任务
 
-在 Actions 中选择 **每日 GitHub Trending 推送**，手动运行一次。首次运行时，最近 7 天没有历史记录，因此当天榜单都会被视为新项目。
+在 Actions 中选择 **每日 GitHub Trending 推送**，手动运行一次。首次运行时，最近 30 天没有历史记录，因此当天榜单都会被视为新项目。
 
 随后检查：
 
@@ -96,7 +96,7 @@ GitHub Actions 使用私有 Vault 中的绑定文件，因此不需要配置 `QQ
 
 | 环境变量 | 默认值 | 说明 |
 |---|---:|---|
-| `DEDUP_DAYS` | `7` | 去重窗口天数 |
+| `DEDUP_DAYS` | `30` | 去重窗口天数 |
 | `QQ_CONTENT_LIMIT` | `1800` | 单条 QQ 文本安全长度 |
 | `DESCRIPTION_CHAR_LIMIT` | `220` | 项目说明展示长度 |
 | `TRENDING_ARCHIVE_DIR` | 无 | Vault 私库在运行器中的路径 |

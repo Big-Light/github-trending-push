@@ -92,30 +92,29 @@ async function run() {
   };
   const classified = classifyRepos(makeRepos(3, 'original'), history, {
     now: new Date('2026-05-20T01:00:00.000Z'),
-    dedupDays: 7,
   });
   assert.equal(classified[0].deliveryStatus, 'duplicate');
   assert.equal(classified[0].description, '历史中文说明');
-  assert.equal(classified[1].deliveryStatus, 'new');
+  assert.equal(classified[1].deliveryStatus, 'duplicate');
   assert.equal(classified[2].deliveryStatus, 'new');
 
-  classified[1].description = '新的中文说明';
-  classified[1].descSource = 'translate';
+  classified[2].description = '新的中文说明';
+  classified[2].descSource = 'translate';
   const updatedState = updateStateAfterSuccessfulPush(history, classified, {
     pushedAt: '2026-05-20T02:00:00.000Z',
   });
   assert.equal(updatedState.repos['owner/repo-1'].pushedAt, '2026-05-19T01:00:00.000Z');
-  assert.equal(updatedState.repos['owner/repo-2'].pushedAt, '2026-05-20T02:00:00.000Z');
-  assert.equal(updatedState.repos['owner/repo-2'].localizedDescription, '新的中文说明');
+  assert.equal(updatedState.repos['owner/repo-3'].pushedAt, '2026-05-20T02:00:00.000Z');
+  assert.equal(updatedState.repos['owner/repo-3'].localizedDescription, '新的中文说明');
 
   const markdown = formatObsidianMarkdown(classified, {
     date: '2026-05-20',
     pushStatus: 'success',
   });
-  assert.match(markdown, /duplicate_count: 1/);
-  assert.match(markdown, /近 7 天已推荐，本次未推送/);
+  assert.match(markdown, /duplicate_count: 2/);
+  assert.match(markdown, /近 30 天已推荐，本次未推送/);
   assert.match(markdown, /新项目，已推送到 QQ/);
-  assert.match(markdown, /### 2\. \[owner\/repo-2\]\(https:\/\/github\.com\/owner\/repo-2\) 🆕/);
+  assert.match(markdown, /### 3\. \[owner\/repo-3\]\(https:\/\/github\.com\/owner\/repo-3\) 🆕/);
   assert.doesNotMatch(markdown, /### 1\. \[owner\/repo-1\]\(https:\/\/github\.com\/owner\/repo-1\) 🆕/);
 
   const qqMessages = buildQQMessages(classified.filter((repo) => repo.deliveryStatus === 'new'), {

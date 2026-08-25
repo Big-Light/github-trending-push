@@ -44,7 +44,7 @@ function buildQQMessages(repos, options = {}) {
   const date = options.date || new Date().toISOString().slice(0, 10);
   const contentLimit = options.contentLimit || DEFAULT_QQ_CONTENT_LIMIT;
   if (repos.length === 0) {
-    return [`🔥 GitHub Trending · ${date}\n\n今日暂无新上榜项目（已排除近 7 天推荐过的项目）。`];
+    return [`🔥 GitHub Trending · ${date}\n\n今日暂无新上榜项目（已排除近 30 天推荐过的项目）。`];
   }
 
   const bodyBudget = Math.max(200, contentLimit - 100);
