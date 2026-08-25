@@ -115,6 +115,8 @@ async function run() {
   assert.match(markdown, /duplicate_count: 1/);
   assert.match(markdown, /近 7 天已推荐，本次未推送/);
   assert.match(markdown, /新项目，已推送到 QQ/);
+  assert.match(markdown, /### 2\. \[owner\/repo-2\]\(https:\/\/github\.com\/owner\/repo-2\) 🆕/);
+  assert.doesNotMatch(markdown, /### 1\. \[owner\/repo-1\]\(https:\/\/github\.com\/owner\/repo-1\) 🆕/);
 
   const qqMessages = buildQQMessages(classified.filter((repo) => repo.deliveryStatus === 'new'), {
     date: '2026-05-20',

@@ -186,7 +186,7 @@ function formatObsidianMarkdown(repos, options = {}) {
       repo.todayStars || null,
     ].filter(Boolean).join(' · ');
     lines.push(
-      `### ${repo.rank}. [${repo.name}](${repo.url})`,
+      `### ${repo.rank}. [${repo.name}](${repo.url})${repo.deliveryStatus === 'new' ? ' 🆕' : ''}`,
       '',
       `**状态：** ${statusLabel(repo, pushStatus)}`,
       '',
