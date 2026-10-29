@@ -129,6 +129,12 @@ function updateStateAfterSuccessfulPush(state, repos, options = {}) {
       entry.localizedDescription = repo.description;
       entry.descSource = repo.descSource || 'original';
     }
+    entry.lastSeenDate = options.date || String(seenAt).slice(0, 10);
+    entry.trendingDays = repo.trendingDays || 1;
+    entry.lastDailyStars = Number.parseInt(String(repo.todayStars || '').replace(/[^\d]/g, ''), 10) || 0;
+    if (repo.createdAt) entry.createdAt = repo.createdAt;
+    if (repo.license) entry.license = repo.license;
+    if (repo.ownerType) entry.ownerType = repo.ownerType;
     next.repos[repoId] = entry;
   }
   return next;
@@ -175,6 +181,13 @@ function formatObsidianMarkdown(repos, options = {}) {
 
   if (errorMessage) {
     lines.push('', `> [!warning] QQ 推送失败`, `> ${errorMessage}`);
+  }
+
+  if (options.reportPages?.length) {
+    lines.push('', '## 图片日报', '', `> ${options.reportPages.length} 张，依次为榜单、项目详情和今日观察。`, '');
+    for (const page of options.reportPages) {
+      lines.push(`![${page.replace(/\.(png|svg)$/i, '')}](${date}-images/${encodeURIComponent(page)})`, '');
+    }
   }
 
   lines.push('', '## 项目榜单', '');

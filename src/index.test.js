@@ -9,6 +9,8 @@ const {
   pushToWechat,
   resetGeminiQuotaState,
   truncateText,
+  decorateHistory,
+  enrichRepositoryMetadata,
 } = require('./index');
 const {
   createEmptyState,
@@ -16,6 +18,7 @@ const {
   updateStateAfterSuccessfulPush,
 } = require('./archive');
 const { getQQDeliveryHint, waitForQQBinding } = require('./qq');
+const { buildPages, prepareReport, whyGrowing } = require('./report');
 
 function makeRepos(count, description) {
   return Array.from({ length: count }, (_, index) => ({
@@ -107,6 +110,40 @@ async function run() {
   assert.equal(updatedState.repos['owner/repo-3'].pushedAt, '2026-05-20T02:00:00.000Z');
   assert.equal(updatedState.repos['owner/repo-3'].localizedDescription, '新的中文说明');
 
+  const historyRepos = decorateHistory(classified, {
+    repos: { 'owner/repo-1': { lastSeenDate: '2026-05-19', trendingDays: 3, lastDailyStars: 19 } },
+  }, '2026-05-20');
+  assert.equal(historyRepos[0].trendingDays, 4);
+  assert.equal(historyRepos[0].previousDailyStars, 19);
+  assert.equal(historyRepos[1].trendingDays, 1);
+
+  await enrichRepositoryMetadata(historyRepos.slice(0, 1), {
+    httpClient: { get: async () => ({ data: {
+      created_at: '2026-05-01T00:00:00Z', stargazers_count: 2200,
+      license: { spdx_id: 'MIT' }, owner: { type: 'Organization' }, language: 'Go',
+    } }) },
+  });
+  assert.equal(historyRepos[0].createdAt, '2026-05-01T00:00:00Z');
+  assert.equal(historyRepos[0].stars, '2200');
+
+  const reportInput = makeRepos(25, '帮助开发者整理项目资料。').map((repo, index) => ({
+    ...repo,
+    todayStars: `${2500 - index * 80} stars today`,
+    createdAt: `2026-05-${String(index % 20 + 1).padStart(2, '0')}T00:00:00Z`,
+    trendingDays: 2,
+  }));
+  const report = prepareReport(reportInput, { date: '2026-05-20' });
+  const pages = buildPages(report);
+  assert.equal(report.rising.length, 10);
+  assert.equal(report.newcomers.length, 10);
+  assert.equal(pages.length, 13);
+  assert.equal(new Set([...report.rising, ...report.newcomers].map((repo) => repo.name)).size, 20);
+  assert.match(pages[0].svg, /涨星榜/);
+  assert.match(pages[2].svg, /是什么/);
+  assert.match(pages[12].svg, /今天这三件事/);
+  assert.match(whyGrowing(report.rising[0]), /今天新增 2,500 星/);
+  assert.doesNotMatch(whyGrowing(report.rising[0]), /因为|原因是/);
+
   const markdown = formatObsidianMarkdown(classified, {
     date: '2026-05-20',
     pushStatus: 'success',
@@ -116,6 +153,10 @@ async function run() {
   assert.match(markdown, /新项目，已推送到 QQ/);
   assert.match(markdown, /### 3\. \[owner\/repo-3\]\(https:\/\/github\.com\/owner\/repo-3\) 🆕/);
   assert.doesNotMatch(markdown, /### 1\. \[owner\/repo-1\]\(https:\/\/github\.com\/owner\/repo-1\) 🆕/);
+  const markdownWithImages = formatObsidianMarkdown(classified, {
+    date: '2026-05-20', pushStatus: 'success', reportPages: ['01-涨星榜.png'],
+  });
+  assert.match(markdownWithImages, /2026-05-20-images\/01-%E6%B6%A8%E6%98%9F%E6%A6%9C\.png/);
 
   const qqMessages = buildQQMessages(classified.filter((repo) => repo.deliveryStatus === 'new'), {
     date: '2026-05-20',

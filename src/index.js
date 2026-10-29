@@ -12,6 +12,7 @@ const {
   updateStateAfterSuccessfulPush,
 } = require('./archive');
 const { buildQQMessages, pushToQQ } = require('./qq');
+const { prepareReport, saveImageReport } = require('./report');
 
 let GoogleGenAI = null;
 try {
@@ -144,6 +145,50 @@ async function scrapeTrending() {
   });
 
   console.log(`✅ 成功爬取 ${repos.length} 个项目`);
+  return repos;
+}
+
+function previousDate(date) {
+  return new Date(Date.parse(`${date}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
+}
+
+function decorateHistory(repos, state, date) {
+  const yesterday = previousDate(date);
+  return repos.map((repo) => {
+    const history = state?.repos?.[repo.repoId] || {};
+    const consecutive = history.lastSeenDate === yesterday;
+    return {
+      ...repo,
+      trendingDays: consecutive ? (history.trendingDays || 1) + 1 : 1,
+      previousDailyStars: consecutive ? history.lastDailyStars : null,
+      createdAt: history.createdAt || null,
+      license: history.license || '',
+      ownerType: history.ownerType || '',
+    };
+  });
+}
+
+async function enrichRepositoryMetadata(repos, options = {}) {
+  const httpClient = options.httpClient || axios;
+  const token = options.token || process.env.GITHUB_TOKEN;
+  const headers = { Accept: 'application/vnd.github+json', 'User-Agent': 'github-trending-push' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  for (let i = 0; i < repos.length; i += 4) {
+    await Promise.all(repos.slice(i, i + 4).map(async (repo) => {
+      if (!/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/?$/.test(repo.url)) return;
+      try {
+        const apiUrl = repo.url.replace('https://github.com/', 'https://api.github.com/repos/');
+        const { data } = await httpClient.get(apiUrl, { headers, timeout: 10000 });
+        repo.createdAt = data.created_at || repo.createdAt;
+        repo.license = data.license?.spdx_id || repo.license || '';
+        repo.ownerType = data.owner?.type || repo.ownerType || '';
+        repo.language = repo.language || data.language || '';
+        if (Number.isFinite(data.stargazers_count)) repo.stars = String(data.stargazers_count);
+      } catch (error) {
+        console.warn(`  ⚠️ 无法读取 ${repo.name} 的仓库资料：${error.response?.status || error.message}`);
+      }
+    }));
+  }
   return repos;
 }
 
@@ -438,6 +483,7 @@ async function main() {
   let state = loadArchiveState(archiveRoot);
   let pushStatus = dryRun ? 'dry-run' : 'failed';
   let pushError = null;
+  let report = null;
 
   try {
     repos = await scrapeTrending();
@@ -449,6 +495,7 @@ async function main() {
     repos = classifyRepos(repos, state, {
       dedupDays: Number.parseInt(process.env.DEDUP_DAYS || '30', 10),
     });
+    repos = decorateHistory(repos, state, today);
     const newRepos = repos.filter((repo) => repo.deliveryStatus === 'new');
     const duplicateCount = repos.length - newRepos.length;
     console.log(`🧹 去重完成 — 新项目: ${newRepos.length}，近 30 天重复: ${duplicateCount}`);
@@ -457,6 +504,8 @@ async function main() {
     if (newRepos.length > 0) {
       await enrichDescriptions(newRepos);
     }
+    await enrichRepositoryMetadata(repos);
+    report = prepareReport(repos, { date: today });
 
     const qqMessages = buildQQMessages(newRepos, { today, date: today });
 
@@ -494,6 +543,7 @@ async function main() {
 
       state = updateStateAfterSuccessfulPush(state, repos, {
         pushedAt: new Date().toISOString(),
+        date: today,
       });
       if (archiveRoot) saveArchiveState(archiveRoot, state);
       console.log('🎉 推送完成！');
@@ -503,10 +553,22 @@ async function main() {
     console.error('❌ 运行出错:', err.message);
   } finally {
     if (archiveRoot && repos.length > 0) {
+      let reportPages = [];
+      if (report) {
+        try {
+          const result = saveImageReport(archiveRoot, report);
+          reportPages = result.pages;
+          console.log(`🖼️ 图片日报已保存：${result.folder}（${result.pages.length} 张 ${result.format.toUpperCase()}）`);
+        } catch (error) {
+          console.error(`❌ 图片日报导出失败：${error.message}`);
+          pushError ||= error;
+        }
+      }
       const filePath = saveDailyArchive(archiveRoot, repos, {
         date: today,
         pushStatus,
         pushError: pushError?.message,
+        reportPages,
       });
       console.log(`🗂️ 完整榜单已保存：${filePath}`);
     }
@@ -536,4 +598,6 @@ module.exports = {
   resetGeminiQuotaState,
   scrapeTrending,
   truncateText,
+  decorateHistory,
+  enrichRepositoryMetadata,
 };
